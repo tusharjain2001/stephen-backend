@@ -141,12 +141,22 @@ app.post("/api/contact", async (req, res) => {
     phone: ORG_PHONE,
   };
 
+  const now = new Date();
   const meta = {
     ip,
-    submittedAt: new Date().toLocaleString("en-US", {
+    // Full stamp for the team notification...
+    submittedAt: now.toLocaleString("en-US", {
       timeZone: ORG_TIMEZONE,
       dateStyle: "full",
       timeStyle: "short",
+    }),
+    // ...and the date alone for the visitor's "Submitted On" line, which
+    // 847:17766 renders as "August 5, 2026".
+    submittedDate: now.toLocaleDateString("en-US", {
+      timeZone: ORG_TIMEZONE,
+      month: "long",
+      day: "numeric",
+      year: "numeric",
     }),
   };
 
@@ -155,7 +165,7 @@ app.post("/api/contact", async (req, res) => {
   const from = `"${ORG_NAME}" <${process.env.SMTP_USER}>`;
 
   const toTeam = adminEmail(form, meta);
-  const toUser = userEmail(form, contact);
+  const toUser = userEmail(form, contact, meta);
 
   try {
     // The team notification is the one that must land — if it fails the
