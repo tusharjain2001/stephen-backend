@@ -63,6 +63,23 @@ function getTransporter() {
   return transporter;
 }
 
+/* ------------------------------------------------------------------ *
+ * Site constants
+ *
+ * These are properties of the organisation, not of the environment —
+ * they'd be identical in dev, staging and production, so they live here
+ * rather than as env vars nobody would ever set differently.
+ * ------------------------------------------------------------------ */
+const ORG_NAME = "Stephen's Table";
+
+// Printed in the visitor's confirmation email as "call us if it's urgent".
+// TODO: this is the placeholder from the site footer — swap in the real number.
+const ORG_PHONE = "(970) 555-0123";
+
+// Colorado nonprofit, so submission timestamps are stamped in Mountain Time
+// regardless of which region the function happens to run in.
+const ORG_TIMEZONE = "America/Denver";
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function clean(value, maxLength) {
@@ -121,21 +138,21 @@ app.post("/api/contact", async (req, res) => {
 
   const contact = {
     email: process.env.CONTACT_TO_EMAIL || "info@stephenstablecolorado.org",
-    phone: process.env.CONTACT_PHONE || "(970) 555-0123",
+    phone: ORG_PHONE,
   };
 
   const meta = {
     ip,
     submittedAt: new Date().toLocaleString("en-US", {
-      timeZone: process.env.TIMEZONE || "America/Denver",
+      timeZone: ORG_TIMEZONE,
       dateStyle: "full",
       timeStyle: "short",
     }),
   };
 
-  const fromName = process.env.MAIL_FROM_NAME || "Stephen's Table";
-  const fromAddress = process.env.MAIL_FROM_ADDRESS || process.env.SMTP_USER;
-  const from = `"${fromName}" <${fromAddress}>`;
+  // Gmail rewrites the From header to the authenticated account anyway, so
+  // there's nothing a separate MAIL_FROM_ADDRESS could usefully say.
+  const from = `"${ORG_NAME}" <${process.env.SMTP_USER}>`;
 
   const toTeam = adminEmail(form, meta);
   const toUser = userEmail(form, contact);
