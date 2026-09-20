@@ -4,7 +4,12 @@ const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 
-const { adminEmail, userEmail } = require("./lib/emails");
+const {
+  adminEmail,
+  userEmail,
+  nominationAdminEmail,
+  nominationUserEmail,
+} = require("./lib/emails");
 
 const app = express();
 
@@ -87,11 +92,114 @@ function clean(value, maxLength) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Shared submission plumbing
+ *
+ * The contact form and the nomination form differ only in what they
+ * validate and what they put in the two emails — everything from "who
+ * receives this" down to "a failed acknowledgement is not a failed
+ * submission" is identical, so it lives here once.
+ * ------------------------------------------------------------------ */
+
+// Recorded in the notification email so a bad submission can be traced;
+// nothing gates on it.
+function clientIp(req) {
+  return (
+    (req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    req.socket?.remoteAddress ||
+    "unknown"
+  );
+}
+
+// Both forms land in the same inbox and quote the same phone number — the
+// client asked for one address across the site, so there is no second env var.
+function contactDetails() {
+  return {
+    email: process.env.CONTACT_TO_EMAIL || "info@stephenstablecolorado.org",
+    phone: ORG_PHONE,
+  };
+}
+
+function buildMeta(ip) {
+  const now = new Date();
+  return {
+    ip,
+    // Full stamp for the team notification...
+    submittedAt: now.toLocaleString("en-US", {
+      timeZone: ORG_TIMEZONE,
+      dateStyle: "full",
+      timeStyle: "short",
+    }),
+    // ...and the date alone for the visitor's "Submitted On" line, which
+    // 847:17766 renders as "August 5, 2026".
+    submittedDate: now.toLocaleDateString("en-US", {
+      timeZone: ORG_TIMEZONE,
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    }),
+  };
+}
+
+/**
+ * Send the pair of emails a submission produces and answer the browser.
+ *
+ * `label` only ever appears in the server log. `senderName`/`senderEmail` are
+ * the person who filled the form in — they become the reply-to on the team
+ * notification and the recipient of the acknowledgement.
+ */
+async function deliver(res, { label, teamMail, visitorMail, senderName, senderEmail, inbox, successMessage, failureMessage }) {
+  // Gmail rewrites the From header to the authenticated account anyway, so
+  // there's nothing a separate MAIL_FROM_ADDRESS could usefully say.
+  const from = `"${ORG_NAME}" <${process.env.SMTP_USER}>`;
+
+  try {
+    // The team notification is the one that must land — if it fails the
+    // submission is lost, so it decides the response status.
+    await getTransporter().sendMail({
+      from,
+      to: inbox,
+      // Hitting reply in the inbox answers the visitor, not the SMTP account.
+      replyTo: `"${senderName}" <${senderEmail}>`,
+      subject: teamMail.subject,
+      text: teamMail.text,
+      html: teamMail.html,
+    });
+  } catch (error) {
+    console.error(`${label} — team notification failed:`, error);
+    return res.status(500).json({ success: false, error: failureMessage });
+  }
+
+  // The acknowledgement is a nicety. If it bounces (typo'd address, a
+  // provider rejecting us) the message is already safely in the inbox, so
+  // don't tell the visitor their submission failed.
+  let acknowledged = true;
+  try {
+    await getTransporter().sendMail({
+      from,
+      to: senderEmail,
+      replyTo: inbox,
+      subject: visitorMail.subject,
+      text: visitorMail.text,
+      html: visitorMail.html,
+    });
+  } catch (error) {
+    acknowledged = false;
+    console.error(`${label} — visitor acknowledgement failed:`, error);
+  }
+
+  return res.json({ success: true, acknowledged, message: successMessage });
+}
+
+/* ------------------------------------------------------------------ *
  * Routes
  * ------------------------------------------------------------------ */
 
 app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "stephen-backend", endpoint: "POST /api/contact" });
+  res.json({
+    ok: true,
+    service: "stephen-backend",
+    endpoints: ["POST /api/contact", "POST /api/nominate"],
+  });
 });
 
 app.get("/api/health", (_req, res) => {
@@ -103,12 +211,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.post("/api/contact", async (req, res) => {
-  // Recorded in the notification email so a bad submission can be traced;
-  // nothing gates on it.
-  const ip =
-    (req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
-    req.socket?.remoteAddress ||
-    "unknown";
+  const ip = clientIp(req);
 
   // Honeypot: a field no human sees. Return 200 so bots don't learn.
   if (clean(req.body?.website, 200)) {
@@ -136,79 +239,89 @@ app.post("/api/contact", async (req, res) => {
     return res.status(400).json({ success: false, error: errors[0], errors });
   }
 
-  const contact = {
-    email: process.env.CONTACT_TO_EMAIL || "info@stephenstablecolorado.org",
-    phone: ORG_PHONE,
-  };
+  const contact = contactDetails();
+  const meta = buildMeta(ip);
 
-  const now = new Date();
-  const meta = {
-    ip,
-    // Full stamp for the team notification...
-    submittedAt: now.toLocaleString("en-US", {
-      timeZone: ORG_TIMEZONE,
-      dateStyle: "full",
-      timeStyle: "short",
-    }),
-    // ...and the date alone for the visitor's "Submitted On" line, which
-    // 847:17766 renders as "August 5, 2026".
-    submittedDate: now.toLocaleDateString("en-US", {
-      timeZone: ORG_TIMEZONE,
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    }),
-  };
+  return deliver(res, {
+    label: "Contact form",
+    teamMail: adminEmail(form, meta),
+    visitorMail: userEmail(form, contact, meta),
+    senderName: `${form.firstName} ${form.lastName}`,
+    senderEmail: form.email,
+    inbox: contact.email,
+    successMessage: "Thanks — your message has been sent. We'll be in touch soon.",
+    failureMessage:
+      "We couldn't send your message right now. Please try again, or email us directly.",
+  });
+});
 
-  // Gmail rewrites the From header to the authenticated account anyway, so
-  // there's nothing a separate MAIL_FROM_ADDRESS could usefully say.
-  const from = `"${ORG_NAME}" <${process.env.SMTP_USER}>`;
+/* ------------------------------------------------------------------ *
+ * Nominate a senior
+ *
+ * Mirrors /api/contact — same inbox, same sending account, same two-mail
+ * shape. The form is two steps in the UI but arrives as one payload, so
+ * every field is validated together here.
+ * ------------------------------------------------------------------ */
+app.post("/api/nominate", async (req, res) => {
+  const ip = clientIp(req);
 
-  const toTeam = adminEmail(form, meta);
-  const toUser = userEmail(form, contact, meta);
-
-  try {
-    // The team notification is the one that must land — if it fails the
-    // submission is lost, so it decides the response status.
-    await getTransporter().sendMail({
-      from,
-      to: contact.email,
-      // Hitting reply in the inbox answers the visitor, not the SMTP account.
-      replyTo: `"${form.firstName} ${form.lastName}" <${form.email}>`,
-      subject: toTeam.subject,
-      text: toTeam.text,
-      html: toTeam.html,
-    });
-  } catch (error) {
-    console.error("Contact form — team notification failed:", error);
-    return res.status(500).json({
-      success: false,
-      error: "We couldn't send your message right now. Please try again, or email us directly.",
-    });
+  if (clean(req.body?.website, 200)) {
+    return res.json({ success: true });
   }
 
-  // The acknowledgement is a nicety. If it bounces (typo'd address, a
-  // provider rejecting us) the message is already safely in the inbox, so
-  // don't tell the visitor their submission failed.
-  let acknowledged = true;
-  try {
-    await getTransporter().sendMail({
-      from,
-      to: form.email,
-      replyTo: contact.email,
-      subject: toUser.subject,
-      text: toUser.text,
-      html: toUser.html,
-    });
-  } catch (error) {
-    acknowledged = false;
-    console.error("Contact form — visitor acknowledgement failed:", error);
+  const form = {
+    // Step 1 — the person submitting.
+    firstName: clean(req.body?.firstName, 100),
+    lastName: clean(req.body?.lastName, 100),
+    email: clean(req.body?.email, 200),
+    need: clean(req.body?.need, 5000),
+    relationship: clean(req.body?.relationship, 100),
+    // Step 2 — the senior being nominated.
+    seniorName: clean(req.body?.seniorName, 200),
+    age: clean(req.body?.age, 10),
+    phone: clean(req.body?.phone, 40),
+    seniorEmail: clean(req.body?.seniorEmail, 200),
+    address: clean(req.body?.address, 300),
+    city: clean(req.body?.city, 100),
+    zip: clean(req.body?.zip, 20),
+  };
+
+  const errors = [];
+  if (!form.firstName) errors.push("Your first name is required.");
+  if (!form.lastName) errors.push("Your last name is required.");
+  if (!EMAIL_RE.test(form.email)) errors.push("A valid email address is required.");
+  if (!form.need) errors.push("Please tell us about the need.");
+  if (!form.relationship) errors.push("Please tell us your relationship to the senior.");
+  if (!form.seniorName) errors.push("The senior's full name is required.");
+  if (!form.age) errors.push("The senior's age is required.");
+  if (!form.phone) errors.push("A phone number for the senior is required.");
+  // The form marks this one required, but a senior without email is exactly
+  // the person this service exists for — so it is validated only if given,
+  // and the phone number above is what the team actually calls on.
+  if (form.seniorEmail && !EMAIL_RE.test(form.seniorEmail)) {
+    errors.push("Please check the senior's email address.");
+  }
+  if (!form.address) errors.push("The senior's home address is required.");
+  if (!form.city) errors.push("City is required.");
+  if (!form.zip) errors.push("Zip code is required.");
+
+  if (errors.length) {
+    return res.status(400).json({ success: false, error: errors[0], errors });
   }
 
-  return res.json({
-    success: true,
-    acknowledged,
-    message: "Thanks — your message has been sent. We'll be in touch soon.",
+  const contact = contactDetails();
+  const meta = buildMeta(ip);
+
+  return deliver(res, {
+    label: "Nomination form",
+    teamMail: nominationAdminEmail(form, meta),
+    visitorMail: nominationUserEmail(form, contact, meta),
+    senderName: `${form.firstName} ${form.lastName}`,
+    senderEmail: form.email,
+    inbox: contact.email,
+    successMessage: "Thanks — we've received the nomination and will be in touch soon.",
+    failureMessage:
+      "We couldn't submit this nomination right now. Please try again, or email us directly.",
   });
 });
 

@@ -1,8 +1,12 @@
 # stephen-backend
 
-Mail backend for the Stephen's Table contact form. One endpoint: it emails the
-submission to the team inbox and emails a branded confirmation back to the
-visitor. Express + Nodemailer, deployed as a single Vercel serverless function.
+Mail backend for the Stephen's Table website forms — **Contact us** and
+**Nominate a senior**. Each endpoint emails the submission to the team inbox and
+emails a branded confirmation back to the person who submitted it. Express +
+Nodemailer, deployed as a single Vercel serverless function.
+
+Both forms deliver to the same inbox (`CONTACT_TO_EMAIL`) and send from the same
+account (`SMTP_USER`) — that is deliberate, not an oversight.
 
 ```
 npm install
@@ -16,7 +20,8 @@ npm run dev               # http://localhost:5000
 |---|---|---|
 | `GET` | `/` | liveness check |
 | `GET` | `/api/health` | reports whether SMTP + the inbox are configured (no secrets) |
-| `POST` | `/api/contact` | validates, then sends both emails |
+| `POST` | `/api/contact` | contact form — validates, then sends both emails |
+| `POST` | `/api/nominate` | nominate-a-senior form — same, with its own templates |
 
 ### `POST /api/contact`
 
@@ -50,15 +55,59 @@ form should still show success.
 An optional `website` field is a honeypot — keep it hidden and empty in the
 markup. Anything in it gets a silent `200` and no mail.
 
+### `POST /api/nominate`
+
+Body — the exact field names the Nominate form uses. The form is two steps in
+the UI, but it arrives as one payload:
+
+```json
+{
+  "firstName": "Jane",
+  "lastName": "Doe",
+  "email": "jane@example.com",
+  "relationship": "Neighbor",
+  "need": "Needs help with groceries and rides to appointments.",
+
+  "seniorName": "Arthur Miller",
+  "age": "82",
+  "phone": "970-555-0134",
+  "seniorEmail": "arthur@example.com",
+  "address": "12 Oak St",
+  "city": "Durango",
+  "zip": "81301"
+}
+```
+
+Everything is required **except `seniorEmail`**, which is validated only if
+it's given — a senior with no email address is exactly the person this service
+exists for, and `phone` is what the team actually calls on. Same response
+shapes, same honeypot, same `acknowledged` semantics as `/api/contact`.
+
+The confirmation goes to the **nominator** (`email`), never to the senior. The
+senior hasn't filled anything in and hasn't agreed to be emailed; the team
+reaches out to them directly.
+
 ## Wiring the frontend
 
-Set `VITE_API_URL` in the site's `.env` (`http://localhost:5000` in dev, the
-Vercel URL in production) and post the form state to `${VITE_API_URL}/api/contact`.
+Both endpoints are hardcoded in the site rather than read from an env var —
+they are the only two network calls it makes, so a build-time variable would be
+one more thing to set on the host for no benefit:
+
+- `src/pages/Contact.jsx` → `CONTACT_ENDPOINT`
+- `src/pages/Nominate.jsx` → `NOMINATE_ENDPOINT`
+
+Point them at `http://localhost:5000/api/...` to develop against a local
+backend. The site's own origin must appear in `ALLOWED_ORIGINS` here, or the
+browser blocks the POST at CORS before it reaches the handler.
 
 ## Notes on behaviour
 
-- **The team email's `Reply-To` is the visitor**, so hitting reply in your
-  inbox answers them rather than the SMTP account.
+- **The team email's `Reply-To` is the visitor** (on a nomination, the
+  nominator), so hitting reply in your inbox answers them rather than the SMTP
+  account.
+- **Both forms share one inbox.** `CONTACT_TO_EMAIL` is the single place that
+  decides where every submission lands; there is no separate nomination
+  address.
 - **The team email decides the HTTP status.** If it fails you get a 500 and the
   visitor is asked to retry; if only the confirmation fails, it's a 200.
 - **There is no rate limit.** Spam control is the honeypot plus the CORS
