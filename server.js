@@ -9,6 +9,8 @@ const {
   userEmail,
   nominationAdminEmail,
   nominationUserEmail,
+  volunteerAdminEmail,
+  volunteerUserEmail,
 } = require("./lib/emails");
 
 const app = express();
@@ -198,7 +200,7 @@ app.get("/", (_req, res) => {
   res.json({
     ok: true,
     service: "stephen-backend",
-    endpoints: ["POST /api/contact", "POST /api/nominate"],
+    endpoints: ["POST /api/contact", "POST /api/nominate", "POST /api/volunteer"],
   });
 });
 
@@ -322,6 +324,65 @@ app.post("/api/nominate", async (req, res) => {
     successMessage: "Thanks — we've received the nomination and will be in touch soon.",
     failureMessage:
       "We couldn't submit this nomination right now. Please try again, or email us directly.",
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Volunteer sign-up
+ *
+ * The popup form behind "Sign up for Volunteering". Same inbox and
+ * two-mail shape as the others. `stayInTouch` is the news-and-events
+ * opt-in; volunteer emails go out either way, as the form says.
+ * ------------------------------------------------------------------ */
+app.post("/api/volunteer", async (req, res) => {
+  const ip = clientIp(req);
+
+  if (clean(req.body?.website, 200)) {
+    return res.json({ success: true });
+  }
+
+  const form = {
+    firstName: clean(req.body?.firstName, 100),
+    lastName: clean(req.body?.lastName, 100),
+    email: clean(req.body?.email, 200),
+    phone: clean(req.body?.phone, 40),
+    stayInTouch: req.body?.stayInTouch === true || req.body?.stayInTouch === "true",
+    address: clean(req.body?.address, 300),
+    address2: clean(req.body?.address2, 300),
+    city: clean(req.body?.city, 100),
+    state: clean(req.body?.state, 100),
+    zip: clean(req.body?.zip, 20),
+    country: clean(req.body?.country, 100),
+  };
+
+  const errors = [];
+  if (!form.firstName) errors.push("First name is required.");
+  if (!form.lastName) errors.push("Last name is required.");
+  if (!EMAIL_RE.test(form.email)) errors.push("A valid email address is required.");
+  if (form.phone.replace(/\D/g, "").length < 10) errors.push("Please enter a full phone number, including area code.");
+  if (!form.address) errors.push("Street address is required.");
+  if (!form.city) errors.push("City is required.");
+  if (!form.state) errors.push("State is required.");
+  if (!form.zip) errors.push("Postal / zip code is required.");
+  if (!form.country) errors.push("Country is required.");
+
+  if (errors.length) {
+    return res.status(400).json({ success: false, error: errors[0], errors });
+  }
+
+  const contact = contactDetails();
+  const meta = buildMeta(ip);
+
+  return deliver(res, {
+    label: "Volunteer form",
+    teamMail: volunteerAdminEmail(form, meta),
+    visitorMail: volunteerUserEmail(form, contact, meta),
+    senderName: `${form.firstName} ${form.lastName}`,
+    senderEmail: form.email,
+    inbox: contact.email,
+    successMessage: "Thanks for signing up to volunteer! We'll be in touch soon.",
+    failureMessage:
+      "We couldn't send your sign-up right now. Please try again, or email us directly.",
   });
 });
 

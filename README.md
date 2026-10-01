@@ -1,11 +1,11 @@
 # stephen-backend
 
-Mail backend for the Stephen's Table website forms — **Contact us** and
-**Nominate a senior**. Each endpoint emails the submission to the team inbox and
+Mail backend for the Stephen's Table website forms — **Contact us**,
+**Nominate a senior** and **Volunteer sign-up**. Each endpoint emails the submission to the team inbox and
 emails a branded confirmation back to the person who submitted it. Express +
 Nodemailer, deployed as a single Vercel serverless function.
 
-Both forms deliver to the same inbox (`CONTACT_TO_EMAIL`) and send from the same
+All forms deliver to the same inbox (`CONTACT_TO_EMAIL`) and send from the same
 account (`SMTP_USER`) — that is deliberate, not an oversight.
 
 ```
@@ -22,6 +22,7 @@ npm run dev               # http://localhost:5000
 | `GET` | `/api/health` | reports whether SMTP + the inbox are configured (no secrets) |
 | `POST` | `/api/contact` | contact form — validates, then sends both emails |
 | `POST` | `/api/nominate` | nominate-a-senior form — same, with its own templates |
+| `POST` | `/api/volunteer` | volunteer sign-up popup — same, with its own templates |
 
 ### `POST /api/contact`
 
@@ -87,14 +88,40 @@ The confirmation goes to the **nominator** (`email`), never to the senior. The
 senior hasn't filled anything in and hasn't agreed to be emailed; the team
 reaches out to them directly.
 
+### `POST /api/volunteer`
+
+Body — the field names the volunteer sign-up popup uses:
+
+```json
+{
+  "firstName": "Jane",
+  "lastName": "Doe",
+  "email": "jane@example.com",
+  "phone": "303 555 0199",
+  "stayInTouch": true,
+  "address": "123 North Main Street",
+  "address2": "#12",
+  "city": "Denver",
+  "state": "Colorado",
+  "zip": "80205",
+  "country": "United States"
+}
+```
+
+Everything is required except `address2` and `stayInTouch` (the news-and-events
+opt-in; volunteer emails go out regardless). `phone` must contain at least 10
+digits. Same response shapes, honeypot and `acknowledged` semantics as
+`/api/contact`.
+
 ## Wiring the frontend
 
-Both endpoints are hardcoded in the site rather than read from an env var —
-they are the only two network calls it makes, so a build-time variable would be
+The endpoints are hardcoded in the site rather than read from an env var —
+they are the only network calls it makes, so a build-time variable would be
 one more thing to set on the host for no benefit:
 
 - `src/pages/Contact.jsx` → `CONTACT_ENDPOINT`
 - `src/pages/Nominate.jsx` → `NOMINATE_ENDPOINT`
+- `src/components/VolunteerDialog.jsx` → `VOLUNTEER_ENDPOINT`
 
 Point them at `http://localhost:5000/api/...` to develop against a local
 backend. The site's own origin must appear in `ALLOWED_ORIGINS` here, or the
@@ -105,7 +132,7 @@ browser blocks the POST at CORS before it reaches the handler.
 - **The team email's `Reply-To` is the visitor** (on a nomination, the
   nominator), so hitting reply in your inbox answers them rather than the SMTP
   account.
-- **Both forms share one inbox.** `CONTACT_TO_EMAIL` is the single place that
+- **All forms share one inbox.** `CONTACT_TO_EMAIL` is the single place that
   decides where every submission lands; there is no separate nomination
   address.
 - **The team email decides the HTTP status.** If it fails you get a 500 and the
